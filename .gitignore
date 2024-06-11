@@ -1,0 +1,6 @@
+.xmake/
+Build/
+.vscode/
+vsxmake2022/
+compile_commands.json
+vs2022/
