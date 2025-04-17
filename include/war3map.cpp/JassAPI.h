@@ -1,8 +1,9 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <type_traits>
 #include <string>
+#include <Windows.h>
 
 #define WA3MAPCPP_FORCE_INLINE __forceinline
 #define WAR3MAP_FUNC __declspec(dllexport) __stdcall
@@ -92,9 +93,19 @@ namespace war3mapcpp::detail
         template <class _Tp>
         inline constexpr _Tp &&Forward(_Tp &&__t) noexcept { return static_cast<_Tp &&>(__t); }
 
+        static uintptr_t GetAddress(uintptr_t offset)
+        {
+            static uintptr_t gamedll = (uintptr_t)GetModuleHandleA("Game.dll");
+            return gamedll + offset;
+        }
+
         static uintptr_t FindNative(const char *name)
         {
-            // TODO IMPL
+            auto nativeFunc = war3mapcpp::detail::fast_call<int>(GetAddress(0x7E2FE0), name);
+            if (nativeFunc)
+            {
+                return *(uintptr_t *)(nativeFunc + 0x1c);
+            }
             return 0;
         }
 
@@ -108,13 +119,33 @@ namespace war3mapcpp::detail
                 return ret_value;
             }
         };
+
+        // 参数转发工具：将 float 左值转换为 float*
+        template <typename T>
+        decltype(auto) forward_arg(T &&arg)
+        {
+            using DecayT = std::decay_t<T>;
+            if constexpr (std::is_same_v<DecayT, float>)
+            {
+                // 确保只有左值会被转换
+                static_assert(
+                    std::is_lvalue_reference_v<decltype(arg)>,
+                    "Float parameters must be lvalues to convert to pointers.");
+                return &arg; // 返回 float*
+            }
+            else
+            {
+                return std::forward<T>(arg); // 其他类型原样转发
+            }
+        };
+
         template <>
         struct api<void>
         {
             template <typename... Args>
             static WA3MAPCPP_FORCE_INLINE auto call(uintptr_t address, Args &&...args) -> void
             {
-                war3mapcpp::detail::c_call<void>(address, invoke::Forward<Args>(args)...);
+                war3mapcpp::detail::c_call<void>(address, forward_arg(invoke::Forward<Args>(args))...);
             }
         };
     }
@@ -125,7 +156,7 @@ namespace war3mapcpp::detail
     static auto addr = war3mapcpp::detail::invoke::FindNative(#func); \
     return war3mapcpp::detail::invoke::api<decltype(func(__VA_ARGS__))>::call(addr, ##__VA_ARGS__)
 
-#define _jstr(str) war3mapcpp::api::Str2JStr(str)
+#define _jstr(str) war3mapcpp::api::Str2JStr(&war3mapcpp::api::RCString{}, str)
 
 namespace war3mapcpp::api
 {
@@ -224,20 +255,41 @@ namespace war3mapcpp::api
     using HTRIGGERCONDITION = int;
     using HEVENT = int;
     using HTERRAINDEFORMATION = int;
-    using CJassString = int;
     using CODE = int;
     using HHANDLE = int;
     using HAGENT = int;
     using BOOLEAN = int;
 
-    CJassString Str2JStr(const char *str)
+    struct CStringRep // the actual class name is CStringRep ;)
     {
-        // TODO IMPL
-        return 0;
+        DWORD vtable;   // 0x00
+        DWORD refCount; // 0x04 ?
+        DWORD dwUnk1;   // 0x08 ?
+        DWORD pUnk2;    // 0x0C ?
+        DWORD pUnk3;    // 0x10 ?
+        DWORD pUnk4;    // 0x14 this-0xC .o0
+        DWORD pUnk5;    // 0x18
+        char *data;     // 0x1C ...
+    };
+    struct RCString
+    {
+        DWORD vtable;
+        DWORD refcnt;
+        CStringRep *data;
+    };
+    static_assert(sizeof(RCString) == 0xC, "RCString size mismatch!");
+    using CJassString = RCString *;
+
+    CJassString Str2JStr(RCString *rc, const char *str)
+    {
+        static uintptr_t addr = war3mapcpp::detail::invoke::GetAddress(0x0506D0);
+        static uintptr_t vftable = war3mapcpp::detail::invoke::GetAddress(0x952F7C);
+        rc->vtable = vftable;
+        return war3mapcpp::detail::this_call<CJassString>(addr, rc, str);
     }
-    CJassString Str2JStr(const std::string &str)
+    CJassString Str2JStr(RCString *rc, const std::string &str)
     {
-        return Str2JStr(str.c_str());
+        return Str2JStr(rc, str.c_str());
     }
 
     WA3MAPCPP_FORCE_INLINE int JASSAPI AbilityId(CJassString abilityIdString) { WAR3MAPCPP_CALL_JASS(AbilityId, abilityIdString); }
