@@ -3,11 +3,14 @@
 #include <cstdint>
 #include <type_traits>
 #include <string>
+#include <functional>
 #include <Windows.h>
 
 #define WA3MAPCPP_FORCE_INLINE __forceinline
 #define WAR3MAP_FUNC __declspec(dllexport) __stdcall
 #define JASSAPI __cdecl
+
+using JCALLBACK = std::function<void()>;
 
 namespace war3mapcpp::detail
 {
@@ -109,17 +112,6 @@ namespace war3mapcpp::detail
             return 0;
         }
 
-        template <typename ReturnType>
-        struct api
-        {
-            template <typename... Args>
-            static WA3MAPCPP_FORCE_INLINE auto call(uintptr_t address, Args &&...args) -> ReturnType
-            {
-                ReturnType ret_value = war3mapcpp::detail::c_call<ReturnType>(address, invoke::Forward<Args>(args)...);
-                return ret_value;
-            }
-        };
-
         // 参数转发工具：将 float 左值转换为 float*
         template <typename T>
         decltype(auto) forward_arg(T &&arg)
@@ -133,9 +125,24 @@ namespace war3mapcpp::detail
                     "Float parameters must be lvalues to convert to pointers.");
                 return &arg; // 返回 float*
             }
+            else if constexpr (std::is_same_v<DecayT, JCALLBACK>)
+            {
+                return war3mapcpp::api::CreateCode(arg);
+            }
             else
             {
                 return std::forward<T>(arg); // 其他类型原样转发
+            }
+        };
+
+        template <typename ReturnType>
+        struct api
+        {
+            template <typename... Args>
+            static WA3MAPCPP_FORCE_INLINE auto call(uintptr_t address, Args &&...args) -> ReturnType
+            {
+                ReturnType ret_value = war3mapcpp::detail::c_call<ReturnType>(address, forward_arg(invoke::Forward<Args>(args))...);
+                return ret_value;
             }
         };
 
@@ -292,6 +299,276 @@ namespace war3mapcpp::api
         return Str2JStr(rc, str.c_str());
     }
 
+    // wc3 hash algo
+    uint32_t string_hash(const char *str)
+    {
+        static auto addr = war3mapcpp::detail::invoke::GetAddress(0x120694);
+        return war3mapcpp::detail::c_call<uint32_t>(addr, str);
+    }
+
+    struct node;
+
+    struct node_2
+    {
+        node_2 *lft_;
+        node *rht_;
+        const char *str_;
+    };
+
+    struct node_1
+    {
+        node_1 *next_;
+        node *prev_;
+        node_2 *lft_;
+        node *rht_;
+        const char *str_;
+    };
+
+    struct node
+    {
+        uint32_t hash_;
+        node_1 *next_;
+        node *prev_;
+        node_2 *lft_;
+        node *rht_;
+        uint32_t key;
+
+        bool is_vaild() const
+        {
+            return ((intptr_t)this > 0x10000);
+        }
+    };
+
+    template <class Node = node>
+    struct table
+    {
+        template <class Node = node>
+        struct entry
+        {
+            uint32_t step;
+            node_1 *tail;
+            Node *head;
+
+            node *convert(Node *ptr) const
+            {
+                return (node *)((uintptr_t)ptr + step - 4);
+            }
+        };
+
+        uint32_t unk0;
+        uint32_t step;
+        uint32_t tail;
+        Node *head;
+        uint32_t unk4;
+        uint32_t unk5;
+        uint32_t unk6;
+        entry<Node> *buckets;
+        uint32_t unk8;
+        uint32_t mask;
+
+        Node *find(uint32_t hash)
+        {
+            Node *fnode_ptr = nullptr;
+
+            if (mask == 0xFFFFFFFF)
+                return nullptr;
+
+            fnode_ptr = buckets[hash & mask].head;
+
+            if (!fnode_ptr->is_vaild())
+                return nullptr;
+
+            for (;;)
+            {
+                if (fnode_ptr->hash_ == hash)
+                    return fnode_ptr;
+                fnode_ptr = (Node *)(uintptr_t)(fnode_ptr->prev_);
+
+                if (!fnode_ptr->is_vaild())
+                    return nullptr;
+            }
+        }
+
+        Node *find(const char *str)
+        {
+            uint32_t hash;
+            Node *fnode_ptr = nullptr;
+
+            if (mask == 0xFFFFFFFF)
+                return nullptr;
+
+            hash = string_hash(str);
+
+            fnode_ptr = buckets[hash & mask].head;
+
+            if (!fnode_ptr->is_vaild())
+                return nullptr;
+
+            for (;;)
+            {
+                if (fnode_ptr->hash_ == hash)
+                {
+                    if ((const char *)fnode_ptr->key == str)
+                        return fnode_ptr;
+
+                    if (0 == strcmp((const char *)fnode_ptr->key, str))
+                        return fnode_ptr;
+                }
+                fnode_ptr = (Node *)(uintptr_t)(fnode_ptr->prev_);
+
+                if (!fnode_ptr->is_vaild())
+                    return nullptr;
+            }
+        }
+    };
+
+    struct reverse_node : public node
+    {
+        uint32_t value;
+    };
+
+    struct reverse_table
+    {
+        typedef table<reverse_node> table_t;
+
+        uint32_t unk0_;
+        uint32_t size;
+        reverse_node **node_array_;
+        uint32_t unk3_;
+        table_t table_;
+
+        reverse_node *at(uint32_t index)
+        {
+            return node_array_[index];
+        }
+
+        reverse_node *find(uint32_t hash)
+        {
+            return table_.find(hash);
+        }
+
+        reverse_node *find(const char *str)
+        {
+            return table_.find(str);
+        }
+    };
+
+    struct JassNativeNode
+    {
+        LPVOID vtable;
+        UINT32 hash_, unused2, unused3, unused4;
+        _Maybenull_ JassNativeNode *nxtNode;
+        char *fnName;
+        PROC fnAddr;
+        UINT32 argCount;
+        char *protoStr;
+        UINT32 argNameArrCount, argNameArrNonNullCount;
+        _Maybenull_ char **fnArgNames; // c_str array
+        UINT32 unused5, retType;
+    };
+
+    static size_t callbackTopCount = 0;
+    static std::unordered_map<size_t, JCALLBACK> callbackMap;
+    static std::unordered_map<size_t, CODE> callbackCodeMap;
+    static std::unordered_map<size_t, size_t *> callbackCodes;
+    constexpr int HOOK_NATIVE_CALLBACK_MAGIC = 0x3f3f3f3f;
+    PROC origIsUnitType = nullptr;
+
+    size_t __cdecl HookNativeIsUnitType(size_t arg1, size_t arg2)
+    {
+        if (arg2 == HOOK_NATIVE_CALLBACK_MAGIC)
+        {
+            callbackMap[arg1]();
+            return 0;
+        }
+        else
+        {
+            return reinterpret_cast<size_t(__cdecl *)(size_t, size_t)>(origIsUnitType)(arg1, arg2);
+        }
+    }
+
+    void InstallCodeCallback()
+    {
+        auto node = war3mapcpp::detail::invoke::GetAddress(0x7E2FE0);
+        auto ptr = war3mapcpp::detail::fast_call<JassNativeNode *>(node, "IsUnitType");
+        if (ptr)
+        {
+            if (!origIsUnitType)
+            {
+                origIsUnitType = ptr->fnAddr;
+            }
+            ptr->fnAddr = (PROC)HookNativeIsUnitType;
+        }
+    }
+
+    uintptr_t MemRead(uintptr_t address)
+    {
+        return *(uintptr_t *)address;
+    }
+
+    uintptr_t GetInstance(int index)
+    {
+        return war3mapcpp::detail::fast_call<uintptr_t>(war3mapcpp::detail::invoke::GetAddress(0x04EFB0), index);
+    }
+
+    uintptr_t GetCurrentVM(int index = 1)
+    {
+        auto ins = GetInstance(5);
+        ins = MemRead(ins + 0x90);
+        return MemRead(ins + 0x4 * index);
+    }
+
+    reverse_table *GetSymbolTable()
+    {
+        return (reverse_table *)MemRead(MemRead(GetCurrentVM() + 0x2858) + 0x8);
+    }
+
+    uintptr_t GetCurrentCodeRelativeAddress()
+    {
+        auto vm = GetCurrentVM();
+        auto code = MemRead(vm + 0x2884 + 0x4);
+        return MemRead(code + 0x8);
+    }
+
+    CODE CreateCode(const JCALLBACK &callback)
+    {
+        static auto runOnce = false;
+        static uintptr_t hookNativeFuncId = 0;
+        if (!runOnce)
+        {
+            runOnce = true;
+            hookNativeFuncId = GetSymbolTable()->find("IsUnitType")->value;
+            InstallCodeCallback();
+        }
+
+        auto it = std::find_if(callbackMap.begin(), callbackMap.end(), [&](const auto &pair)
+                               { return pair.second.target<JCALLBACK>() == callback.target<JCALLBACK>(); });
+        if (it != callbackMap.end())
+        {
+            return callbackCodeMap[it->first];
+        }
+
+        callbackMap[++callbackTopCount] = callback;
+
+        auto bytecodeBuff = new uintptr_t[]{
+            0,
+            0x0CD00400, callbackTopCount,           // mov reg, callbackTopCount
+            0x13D00000, 0x00000000,                 // push reg
+            0x0CD00400, HOOK_NATIVE_CALLBACK_MAGIC, // mov reg, HOOK_NATIVE_CALLBACK_MAGIC
+            0x13D00000, 0x00000000,                 // push reg
+            0x15000000, hookNativeFuncId,           // call_native hookNativeFuncId
+            0x0D00D000, 0x00000000,                 // set ret
+            0x27000000, 0x00000000,                 // ret
+        };
+
+        bytecodeBuff[0] = uintptr_t(bytecodeBuff) + 4;
+        callbackCodes[callbackTopCount] = bytecodeBuff;
+
+        CODE ret = uintptr_t((uintptr_t(bytecodeBuff) - GetCurrentCodeRelativeAddress()) / 4);
+        callbackCodeMap[callbackTopCount] = ret;
+        return ret;
+    }
+
     WA3MAPCPP_FORCE_INLINE int JASSAPI AbilityId(CJassString abilityIdString) { WAR3MAPCPP_CALL_JASS(AbilityId, abilityIdString); }
     WA3MAPCPP_FORCE_INLINE CJassStringSID JASSAPI AbilityId2String(int AbilID) { WAR3MAPCPP_CALL_JASS(AbilityId2String, AbilID); }
     WA3MAPCPP_FORCE_INLINE DWFP JASSAPI Acos(float x) { WAR3MAPCPP_CALL_JASS(Acos, x); }
@@ -372,7 +649,7 @@ namespace war3mapcpp::api
     WA3MAPCPP_FORCE_INLINE void JASSAPI ClearTextMessages() { WAR3MAPCPP_CALL_JASS(ClearTextMessages); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI CommandAI(HPLAYER num, int command, int data) { WAR3MAPCPP_CALL_JASS(CommandAI, num, command, data); }
     WA3MAPCPP_FORCE_INLINE int JASSAPI CommandsWaiting() { WAR3MAPCPP_CALL_JASS(CommandsWaiting); }
-    WA3MAPCPP_FORCE_INLINE HCONDITIONFUNC JASSAPI Condition(CODE func) { WAR3MAPCPP_CALL_JASS(Condition, func); }
+    WA3MAPCPP_FORCE_INLINE HCONDITIONFUNC JASSAPI Condition(JCALLBACK func) { WAR3MAPCPP_CALL_JASS(Condition, func); }
     WA3MAPCPP_FORCE_INLINE HAIDIFFICULTY JASSAPI ConvertAIDifficulty(int i) { WAR3MAPCPP_CALL_JASS(ConvertAIDifficulty, i); }
     WA3MAPCPP_FORCE_INLINE HALLIANCETYPE JASSAPI ConvertAllianceType(int i) { WAR3MAPCPP_CALL_JASS(ConvertAllianceType, i); }
     WA3MAPCPP_FORCE_INLINE HATTACKTYPE JASSAPI ConvertAttackType(int i) { WAR3MAPCPP_CALL_JASS(ConvertAttackType, i); }
@@ -523,11 +800,11 @@ namespace war3mapcpp::api
     WA3MAPCPP_FORCE_INLINE void JASSAPI EndCinematicScene() { WAR3MAPCPP_CALL_JASS(EndCinematicScene); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI EndGame(BOOLEAN doScoreScreen) { WAR3MAPCPP_CALL_JASS(EndGame, doScoreScreen); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI EndThematicMusic() { WAR3MAPCPP_CALL_JASS(EndThematicMusic); }
-    WA3MAPCPP_FORCE_INLINE void JASSAPI EnumDestructablesInRect(HRECT r, HBOOLEXPR filter, CODE actionFunc) { WAR3MAPCPP_CALL_JASS(EnumDestructablesInRect, r, filter, actionFunc); }
-    WA3MAPCPP_FORCE_INLINE void JASSAPI EnumItemsInRect(HRECT r, HBOOLEXPR filter, CODE actionFunc) { WAR3MAPCPP_CALL_JASS(EnumItemsInRect, r, filter, actionFunc); }
+    WA3MAPCPP_FORCE_INLINE void JASSAPI EnumDestructablesInRect(HRECT r, HBOOLEXPR filter, JCALLBACK actionFunc) { WAR3MAPCPP_CALL_JASS(EnumDestructablesInRect, r, filter, actionFunc); }
+    WA3MAPCPP_FORCE_INLINE void JASSAPI EnumItemsInRect(HRECT r, HBOOLEXPR filter, JCALLBACK actionFunc) { WAR3MAPCPP_CALL_JASS(EnumItemsInRect, r, filter, actionFunc); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI ExecuteFunc(CJassString funcName) { WAR3MAPCPP_CALL_JASS(ExecuteFunc, funcName); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI FillGuardPosts() { WAR3MAPCPP_CALL_JASS(FillGuardPosts); }
-    WA3MAPCPP_FORCE_INLINE HFILTERFUNC JASSAPI Filter(CODE func) { WAR3MAPCPP_CALL_JASS(Filter, func); }
+    WA3MAPCPP_FORCE_INLINE HFILTERFUNC JASSAPI Filter(JCALLBACK func) { WAR3MAPCPP_CALL_JASS(Filter, func); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI FinishUbersplat(HUBERSPLAT Splat) { WAR3MAPCPP_CALL_JASS(FinishUbersplat, Splat); }
     WA3MAPCPP_FORCE_INLINE HUNIT JASSAPI FirstOfGroup(HGROUP Group) { WAR3MAPCPP_CALL_JASS(FirstOfGroup, Group); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI FlashQuestDialogButton() { WAR3MAPCPP_CALL_JASS(FlashQuestDialogButton); }
@@ -544,8 +821,8 @@ namespace war3mapcpp::api
     WA3MAPCPP_FORCE_INLINE void JASSAPI FogMaskEnable(BOOLEAN enable) { WAR3MAPCPP_CALL_JASS(FogMaskEnable, enable); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI FogModifierStart(HFOGMODIFIER FogModifier) { WAR3MAPCPP_CALL_JASS(FogModifierStart, FogModifier); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI FogModifierStop(HFOGMODIFIER FogModifier) { WAR3MAPCPP_CALL_JASS(FogModifierStop, FogModifier); }
-    WA3MAPCPP_FORCE_INLINE void JASSAPI ForForce(HFORCE Force, CODE callback) { WAR3MAPCPP_CALL_JASS(ForForce, Force, callback); }
-    WA3MAPCPP_FORCE_INLINE void JASSAPI ForGroup(HGROUP Group, CODE callback) { WAR3MAPCPP_CALL_JASS(ForGroup, Group, callback); }
+    WA3MAPCPP_FORCE_INLINE void JASSAPI ForForce(HFORCE Force, JCALLBACK callback) { WAR3MAPCPP_CALL_JASS(ForForce, Force, callback); }
+    WA3MAPCPP_FORCE_INLINE void JASSAPI ForGroup(HGROUP Group, JCALLBACK callback) { WAR3MAPCPP_CALL_JASS(ForGroup, Group, callback); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI ForceAddPlayer(HFORCE Force, HPLAYER player) { WAR3MAPCPP_CALL_JASS(ForceAddPlayer, Force, player); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI ForceCampaignSelectScreen() { WAR3MAPCPP_CALL_JASS(ForceCampaignSelectScreen); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI ForceCinematicSubtitles(BOOLEAN flag) { WAR3MAPCPP_CALL_JASS(ForceCinematicSubtitles, flag); }
@@ -1276,7 +1553,7 @@ namespace war3mapcpp::api
     WA3MAPCPP_FORCE_INLINE void JASSAPI SetHeroAgi(HUNIT hero, int newAgi, BOOLEAN permanent) { WAR3MAPCPP_CALL_JASS(SetHeroAgi, hero, newAgi, permanent); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI SetHeroInt(HUNIT hero, int newInt, BOOLEAN permanent) { WAR3MAPCPP_CALL_JASS(SetHeroInt, hero, newInt, permanent); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI SetHeroLevel(HUNIT hero, int level, BOOLEAN showEyeCandy) { WAR3MAPCPP_CALL_JASS(SetHeroLevel, hero, level, showEyeCandy); }
-    WA3MAPCPP_FORCE_INLINE void JASSAPI SetHeroLevels(CODE arg1) { WAR3MAPCPP_CALL_JASS(SetHeroLevels, arg1); }
+    WA3MAPCPP_FORCE_INLINE void JASSAPI SetHeroLevels(JCALLBACK arg1) { WAR3MAPCPP_CALL_JASS(SetHeroLevels, arg1); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI SetHeroStr(HUNIT hero, int newStr, BOOLEAN permanent) { WAR3MAPCPP_CALL_JASS(SetHeroStr, hero, newStr, permanent); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI SetHeroXP(HUNIT hero, int newXpVal, BOOLEAN showEyeCandy) { WAR3MAPCPP_CALL_JASS(SetHeroXP, hero, newXpVal, showEyeCandy); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI SetHeroesBuyItems(BOOLEAN arg1) { WAR3MAPCPP_CALL_JASS(SetHeroesBuyItems, arg1); }
@@ -1437,7 +1714,7 @@ namespace war3mapcpp::api
     WA3MAPCPP_FORCE_INLINE void JASSAPI StartGetEnemyBase() { WAR3MAPCPP_CALL_JASS(StartGetEnemyBase); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI StartMeleeAI(HPLAYER num, CJassString script) { WAR3MAPCPP_CALL_JASS(StartMeleeAI, num, script); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI StartSound(HSOUND soundHandle) { WAR3MAPCPP_CALL_JASS(StartSound, soundHandle); }
-    WA3MAPCPP_FORCE_INLINE void JASSAPI StartThread(CODE arg1) { WAR3MAPCPP_CALL_JASS(StartThread, arg1); }
+    WA3MAPCPP_FORCE_INLINE void JASSAPI StartThread(JCALLBACK arg1) { WAR3MAPCPP_CALL_JASS(StartThread, arg1); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI StopCamera() { WAR3MAPCPP_CALL_JASS(StopCamera); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI StopGathering() { WAR3MAPCPP_CALL_JASS(StopGathering); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI StopMusic(BOOLEAN fadeOut) { WAR3MAPCPP_CALL_JASS(StopMusic, fadeOut); }
@@ -1480,12 +1757,12 @@ namespace war3mapcpp::api
     WA3MAPCPP_FORCE_INLINE DWFP JASSAPI TimerGetElapsed(HTIMER Timer) { WAR3MAPCPP_CALL_JASS(TimerGetElapsed, Timer); }
     WA3MAPCPP_FORCE_INLINE DWFP JASSAPI TimerGetRemaining(HTIMER Timer) { WAR3MAPCPP_CALL_JASS(TimerGetRemaining, Timer); }
     WA3MAPCPP_FORCE_INLINE DWFP JASSAPI TimerGetTimeout(HTIMER Timer) { WAR3MAPCPP_CALL_JASS(TimerGetTimeout, Timer); }
-    WA3MAPCPP_FORCE_INLINE void JASSAPI TimerStart(HTIMER Timer, float timeout, BOOLEAN periodic, CODE handlerFunc) { WAR3MAPCPP_CALL_JASS(TimerStart, Timer, timeout, periodic, handlerFunc); }
+    WA3MAPCPP_FORCE_INLINE void JASSAPI TimerStart(HTIMER Timer, float timeout, BOOLEAN periodic, JCALLBACK handlerFunc) { WAR3MAPCPP_CALL_JASS(TimerStart, Timer, timeout, periodic, handlerFunc); }
     WA3MAPCPP_FORCE_INLINE BOOLEAN JASSAPI TownHasHall(int arg1) { WAR3MAPCPP_CALL_JASS(TownHasHall, arg1); }
     WA3MAPCPP_FORCE_INLINE BOOLEAN JASSAPI TownHasMine(int arg1) { WAR3MAPCPP_CALL_JASS(TownHasMine, arg1); }
     WA3MAPCPP_FORCE_INLINE BOOLEAN JASSAPI TownThreatened() { WAR3MAPCPP_CALL_JASS(TownThreatened); }
     WA3MAPCPP_FORCE_INLINE int JASSAPI TownWithMine() { WAR3MAPCPP_CALL_JASS(TownWithMine); }
-    WA3MAPCPP_FORCE_INLINE HTRIGGERACTION JASSAPI TriggerAddAction(HTRIGGER Trigger, CODE actionFunc) { WAR3MAPCPP_CALL_JASS(TriggerAddAction, Trigger, actionFunc); }
+    WA3MAPCPP_FORCE_INLINE HTRIGGERACTION JASSAPI TriggerAddAction(HTRIGGER Trigger, JCALLBACK actionFunc) { WAR3MAPCPP_CALL_JASS(TriggerAddAction, Trigger, actionFunc); }
     WA3MAPCPP_FORCE_INLINE HTRIGGERCONDITION JASSAPI TriggerAddCondition(HTRIGGER Trigger, HBOOLEXPR condition) { WAR3MAPCPP_CALL_JASS(TriggerAddCondition, Trigger, condition); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI TriggerClearActions(HTRIGGER Trigger) { WAR3MAPCPP_CALL_JASS(TriggerClearActions, Trigger); }
     WA3MAPCPP_FORCE_INLINE void JASSAPI TriggerClearConditions(HTRIGGER Trigger) { WAR3MAPCPP_CALL_JASS(TriggerClearConditions, Trigger); }
