@@ -163,7 +163,7 @@ namespace war3mapcpp::detail
     static auto addr = war3mapcpp::detail::invoke::FindNative(#func); \
     return war3mapcpp::detail::invoke::api<decltype(func(__VA_ARGS__))>::call(addr, ##__VA_ARGS__)
 
-#define _jstr(str) war3mapcpp::api::Str2JStr(&war3mapcpp::api::RCString{}, str)
+#define _jstr(str) war3mapcpp::api::Str2JStr(war3mapcpp::api::RCString{}, str)
 
 namespace war3mapcpp::api
 {
@@ -280,21 +280,21 @@ namespace war3mapcpp::api
     };
     struct RCString
     {
-        DWORD vtable;
-        DWORD refcnt;
-        CStringRep *data;
+        DWORD vtable = 0;
+        DWORD refcnt = 0;
+        CStringRep *data = nullptr;
     };
     static_assert(sizeof(RCString) == 0xC, "RCString size mismatch!");
     using CJassString = RCString *;
 
-    CJassString Str2JStr(RCString *rc, const char *str)
+    CJassString Str2JStr(RCString &rc, const char *str)
     {
         static uintptr_t addr = war3mapcpp::detail::invoke::GetAddress(0x0506D0);
         static uintptr_t vftable = war3mapcpp::detail::invoke::GetAddress(0x952F7C);
-        rc->vtable = vftable;
-        return war3mapcpp::detail::this_call<CJassString>(addr, rc, str);
+        rc.vtable = vftable;
+        return war3mapcpp::detail::this_call<CJassString>(addr, &rc, str);
     }
-    CJassString Str2JStr(RCString *rc, const std::string &str)
+    CJassString Str2JStr(RCString &rc, const std::string &str)
     {
         return Str2JStr(rc, str.c_str());
     }
