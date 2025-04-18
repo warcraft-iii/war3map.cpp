@@ -471,7 +471,7 @@ namespace war3mapcpp::api
     static std::unordered_map<size_t, JCALLBACK> callbackMap;
     static std::unordered_map<size_t, CODE> callbackCodeMap;
     static std::unordered_map<size_t, size_t *> callbackCodes;
-    constexpr int HOOK_NATIVE_CALLBACK_MAGIC = 0x3f3f3f3f;
+    constexpr int HOOK_NATIVE_CALLBACK_MAGIC = 'KKMD';
     PROC origIsUnitType = nullptr;
 
     size_t __cdecl HookNativeIsUnitType(size_t arg1, size_t arg2)
@@ -489,8 +489,7 @@ namespace war3mapcpp::api
 
     void InstallCodeCallback()
     {
-        auto node = war3mapcpp::detail::invoke::GetAddress(0x7E2FE0);
-        auto ptr = war3mapcpp::detail::fast_call<JassNativeNode *>(node, "IsUnitType");
+        auto ptr = war3mapcpp::detail::fast_call<JassNativeNode *>(war3mapcpp::detail::invoke::GetAddress(0x7E2FE0), "IsUnitType");
         if (ptr)
         {
             if (!origIsUnitType)
@@ -499,6 +498,26 @@ namespace war3mapcpp::api
             }
             ptr->fnAddr = (PROC)HookNativeIsUnitType;
         }
+    }
+
+    void UnInstallCodeCallback()
+    {
+        if (origIsUnitType)
+        {
+            auto ptr = war3mapcpp::detail::fast_call<JassNativeNode *>(war3mapcpp::detail::invoke::GetAddress(0x7E2FE0), "IsUnitType");
+            if (ptr)
+            {
+                ptr->fnAddr = origIsUnitType;
+            }
+            origIsUnitType = nullptr;
+        }
+        for (auto &item : callbackCodes)
+        {
+            delete[] item.second;
+        }
+        callbackMap.clear();
+        callbackCodes.clear();
+        callbackCodeMap.clear();
     }
 
     uintptr_t MemRead(uintptr_t address)

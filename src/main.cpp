@@ -1,5 +1,11 @@
 #include "JassAPI.h"
 
+int WAR3MAP_FUNC Unload()
+{
+    war3mapcpp::api::UnInstallCodeCallback();
+    return 0;
+}
+
 int WAR3MAP_FUNC main()
 {
     war3mapcpp::api::DisplayTextToPlayer(war3mapcpp::api::GetLocalPlayer(), 0.f, 0.f, _jstr("Hello World"));
